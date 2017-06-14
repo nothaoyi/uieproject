@@ -20,7 +20,7 @@ class CNNModel():
 
 
     def build_model(self, input_layer):
-        with tf.variable_scope("cnn_model", reuse=self.reuse, initializer=self.config['initializer']):
+        with tf.variable_scope("cnn_model", reuse=self.reuse, initializer=tf.contrib.layers.xavier_initializer()):
             # Convolutional Layer #1
             # Computes 32 features using a 3x3 filter with ReLU activation.
             # Padding is added to preserve width and height.
