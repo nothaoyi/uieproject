@@ -153,9 +153,15 @@ def read_and_decode_sequence(filename_queue, config, mode):
 def input_pipeline(filenames, config, name='input_pipeline', mode='training'):
     with tf.name_scope(name):
         # Read the data from TFRecord files, decode and create a list of data samples by using threads.
+        
+        if mode is training:
+            num_epochs = config['num_epochs']
+        elif mode is validation:
+            num_epochs = (config['num_epochs']*config['num_steps_per_epoch'])/config['evaluate_every_step']+1
+        else:
+            num_epochs = 1
             
-        num_epochs = (config['num_epochs'] if mode is 'training' else 1)
-        shuffle = (mode is not 'training')
+        shuffle = (mode is 'training')
             
         filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs, shuffle=shuffle)
         
