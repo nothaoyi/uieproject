@@ -21,15 +21,13 @@ class CNNModel():
 
     def build_model(self, input_layer):
         with tf.variable_scope("cnn_model", reuse=self.reuse, initializer=tf.contrib.layers.xavier_initializer()):
-            # Convolutional Layer #1
-            # Computes 32 features using a 3x3 filter with ReLU activation.
-            # Padding is added to preserve width and height.
+            
             # Input Tensor Shape: [batch_size, 80, 80, num_channels]
             # Output Tensor Shape: [batch_size, 40, 40, num_filter1]
             conv1 = tf.layers.conv2d(
                 inputs=input_layer,
-                filters=self.config['cnn_filters'][0],
-                kernel_size=[3, 3],
+                filters=self.config['num_filters'][0],
+                kernel_size=self.config['kernels'][0],
                 padding="same",
                 activation=tf.nn.relu)
 
@@ -39,8 +37,8 @@ class CNNModel():
             # Output Tensor Shape: [batch_size, 20, 20, num_filter2]
             conv2 = tf.layers.conv2d(
                 inputs=pool1,
-                filters=self.config['cnn_filters'][1],
-                kernel_size=[5, 5],
+                filters=self.config['num_filters'][1],
+                kernel_size=self.config['kernels'][1],
                 padding="same",
                 activation=tf.nn.relu)
 
@@ -50,8 +48,8 @@ class CNNModel():
             # Output Tensor Shape: [batch_size, 10, 10, num_filter3]
             conv3 = tf.layers.conv2d(
                 inputs=pool2,
-                filters=self.config['cnn_filters'][2],
-                kernel_size=[3, 3],
+                filters=self.config['num_filters'][2],
+                kernel_size=self.config['kernels'][2],
                 padding="same",
                 activation=tf.nn.relu)
 
@@ -61,31 +59,39 @@ class CNNModel():
             # Output Tensor Shape: [batch_size, 5, 5, num_filter4]
             conv4 = tf.layers.conv2d(
                 inputs=pool3,
-                filters=self.config['cnn_filters'][3],
-                kernel_size=[3, 3],
+                filters=self.config['num_filters'][3],
+                kernel_size=self.config['kernels'][3],
                 padding="same",
                 activation=tf.nn.relu)
 
             pool4 = tf.layers.max_pooling2d(inputs=conv4, pool_size=[2, 2], strides=2, padding='same')
 
-
             # Flatten tensor into a batch of vectors
             # Input Tensor Shape: [batch_size, 5, 5, num_filter4]
             # Output Tensor Shape: [batch_size, 5 * 5 * num_filter4]
-            conv_flat = tf.reshape(pool4, [-1, 5 * 5 * self.config['cnn_filters'][3]])
+            conv_flat = tf.reshape(pool4, [-1, 5 * 5 * self.config['num_filters'][3]])
+            
+            if self.config['num_hidden_units'][0] != None:
+                dropout1 = tf.layers.dropout(inputs=conv_flat, rate=self.config['dropout_rate'], training=self.is_training)
+                dense1 = tf.layers.dense(inputs=dropout1, units=self.config['num_hidden_units'][0], activation=tf.nn.relu)
+            else:
+                dense1 = conv_flat
+                
+            if self.config['num_hidden_units'][1] != None:
+                dropout2 = tf.layers.dropout(inputs=dense1, rate=self.config['dropout_rate'], training=self.is_training)
+                dense2 = tf.layers.dense(inputs=dropout2, units=self.config['num_hidden_units'][1], activation=tf.nn.relu)
+            else:
+                dense2 = dense1
+            
+            if self.config['num_hidden_units'][2] != None:
+                dropout3 = tf.layers.dropout(inputs=dense2, rate=self.config['dropout_rate'], training=self.is_training)
+                dense3 = tf.layers.dense(inputs=dropout3, units=self.config['num_hidden_units'][2], activation=tf.nn.relu)
+            else:
+                dense3 = dense2
 
-            # Add dropout operation;
-            dropout = tf.layers.dropout(inputs=conv_flat, rate=self.config['dropout_rate'], training=self.is_training)
-
-            # Dense Layer
-            # Densely connected layer with <num_hidden_units> neurons
-            # Input Tensor Shape: [batch_size, 5 * 5 * num_filter4]
-            # Output Tensor Shape: [batch_size, num_hidden_units]
-            dense = tf.layers.dense(inputs=dropout, units=self.config['num_hidden_units'],
-                activation=tf.nn.relu)
-
-            self.cnn_model = dense
-            return dense
+            self.cnn_model = dense3
+            
+            return dense3
 
     def build_graph(self):
         """
@@ -134,9 +140,12 @@ class RNNModel():
         self.reuse = self.mode == "validation"
 
     def build_rnn_model(self):
-        with tf.variable_scope('rnn_cell', reuse=self.reuse, initializer=self.config['initializer']):
+        # first cell
+        with tf.variable_scope('rnn_cell', reuse=self.reuse, initializer=tf.contrib.layers.xavier_initializer()):
             rnn_cell = tf.contrib.rnn.BasicLSTMCell(num_units=self.config['num_hidden_units'])
-        with tf.variable_scope('rnn_stack', reuse=self.reuse, initializer=self.config['initializer']):
+        
+        # additional cells
+        with tf.variable_scope('rnn_stack', reuse=self.reuse, initializer=tf.contrib.layers.xavier_initializer()):
             if self.config['num_layers'] > 1:
                 rnn_cell = tf.contrib.rnn.MultiRNNCell([rnn_cell for _ in range(self.config['num_layers'])])
             self.model_rnn, self.rnn_state = tf.nn.dynamic_rnn(
@@ -146,9 +155,10 @@ class RNNModel():
                                             sequence_length=self.seq_lengths,
                                             time_major=False,
                                             swap_memory=True)
-            # Fetch output of the last step.
+            
+            # fetch output of the last step
             if self.config['loss_type'] == 'last_step':
-                self.rnn_prediction = tf.gather_nd(self.model_rnn, tf.stack([tf.range(self.config['batch_size']), self.seq_lengths-1], axis=1))
+                self.rnn_prediction = tf.gather_nd(self.model_rnn, tf.stack([tf.range(self.config['lr']['batch_size']), self.seq_lengths-1], axis=1))
             elif self.config['loss_type'] == 'average':
                 self.rnn_prediction = self.model_rnn
             else:
@@ -159,7 +169,7 @@ class RNNModel():
     def build_model(self):
         self.build_rnn_model()
         # Calculate logits
-        with tf.variable_scope('logits', reuse=self.reuse, initializer=self.config['initializer']):
+        with tf.variable_scope('logits', reuse=self.reuse, initializer=tf.contrib.layers.xavier_initializer()):
             self.logits = tf.layers.dense(inputs=self.rnn_prediction, units=self.config['num_class_labels'],
                                             kernel_initializer = tf.contrib.layers.xavier_initializer(),
                                             bias_initializer=tf.contrib.layers.xavier_initializer())

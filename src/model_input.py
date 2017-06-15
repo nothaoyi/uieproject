@@ -32,7 +32,6 @@ def preprocessing_op(frame, config):
         # Convert from RGB to grayscale.
         rgb = tf.image.rgb_to_grayscale(rgb)
         seg = tf.image.rgb_to_grayscale(seg)
-        dep = tf.image.rgb_to_grayscale(dep)
         
         # Integer to float.
         rgb = tf.to_float(rgb)
@@ -68,7 +67,8 @@ def preprocessing_op(frame, config):
     
         return tf.stack([rgb, dep], axis=-1)
 
-def read_and_decode_sequence(filename_queue, config):
+    
+def read_and_decode_sequence(filename_queue, config, mode):
     # Create a TFRecordReader.
     readerOptions = tf.python_io.TFRecordOptions(compression_type=tf.python_io.TFRecordCompressionType.GZIP)
     reader = tf.TFRecordReader(options=readerOptions)
@@ -86,43 +86,52 @@ def read_and_decode_sequence(filename_queue, config):
     # The test files doesn't contain "label" field.
     # [height, width, numChannels] = [80, 80, 3]
     with tf.name_scope("TFRecordDecoding"):
-        context_encoded, sequence_encoded = tf.parse_single_sequence_example(
-                serialized_example,
-                # "label" and "lenght" are encoded as context features. 
-                context_features={
+        
+        if mode is not 'inference':
+            context_features = {
                     "label": tf.FixedLenFeature([], dtype=tf.int64),
                     "length": tf.FixedLenFeature([], dtype=tf.int64)
-                },
-                # "depth", "rgb", "segmentation", "skeleton" are encoded as sequence features.
-                sequence_features={
-                    "depth": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                    "rgb": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                    "segmentation": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                    "skeleton": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                })
-
+                }
+        else:
+            context_features = {
+                    "id": tf.FixedLenFeature([], dtype=tf.int64),
+                    "length": tf.FixedLenFeature([], dtype=tf.int64)
+                }
         
-        # Fetch required data fields. 
-        # TODO: Customize for your design. Assume that only the RGB images are used for now.
-        # Decode the serialized RGB images.    
+        sequence_features={
+                "depth": tf.FixedLenSequenceFeature([], dtype=tf.string),
+                "rgb": tf.FixedLenSequenceFeature([], dtype=tf.string),
+                "segmentation": tf.FixedLenSequenceFeature([], dtype=tf.string),
+                "skeleton": tf.FixedLenSequenceFeature([], dtype=tf.string),
+            }
+            
+        context_encoded, sequence_encoded = tf.parse_single_sequence_example(
+                serialized_example,
+                context_features,
+                sequence_features
+            )
+        
+        # fetch required data fields
+        # sequence label (train) or id (test)
+        if mode is not 'inference':
+            seq_label = context_encoded['label']
+            seq_label = seq_label-1
+        else:
+            seq_label = context_encoded['id']
+        
+        # sequence length
+        seq_len = tf.to_int32(context_encoded['length'])
+        
+        # channels
         seq_rgb = tf.decode_raw(sequence_encoded['rgb'], tf.uint8)
         seq_seg = tf.decode_raw(sequence_encoded['segmentation'], tf.uint8)
         seq_dep = tf.decode_raw(sequence_encoded['depth'], tf.uint8)
         
-        # Output dimensionality: [seq_len, height, width, numChannels]
-        
-        # tf.map_fn applies the preprocessing function to every image in the sequence, i.e., frame.
+        # apply preprocessing to data
         seq_rgb = tf.map_fn(lambda x: preprocessing_op(x, config),
                                 elems=(seq_rgb,seq_seg,seq_dep),
                                 dtype=tf.float32,
                                 back_prop=False)
-        
-        seq_label = context_encoded['label']
-        
-        # Tensorflow requires the labels start from 0. Before you create submission csv, 
-        # increment the predictions by 1.
-        seq_label = seq_label - 1
-        seq_len = tf.to_int32(context_encoded['length'])
         
         """
         # Use skeleton only.
@@ -139,108 +148,28 @@ def read_and_decode_sequence(filename_queue, config):
         """
         
         return [seq_rgb, seq_label, seq_len]
-    
 
-def input_pipeline(filenames, config, name='input_pipeline', shuffle=True):
+
+def input_pipeline(filenames, config, name='input_pipeline', mode='training'):
     with tf.name_scope(name):
-        # Create a queue of TFRecord input files.
-        filename_queue = tf.train.string_input_producer(filenames, num_epochs=config['num_epochs'], shuffle=shuffle)
         # Read the data from TFRecord files, decode and create a list of data samples by using threads.
-        sample_list = [read_and_decode_sequence(filename_queue, config) for _ in range(config['ip_num_read_threads'])]
-        # Create batches.
-        # Since the data consists of variable-length sequences, allow padding by setting dynamic_pad parameter.
-        # "batch_join" creates batches of samples and pads the sequences w.r.t the max-length sequence in the batch.
-        # Hence, the padded sequence length can be different for different batches.
-        batch_rgb, batch_labels, batch_lens = tf.train.batch_join(sample_list,
-                                                    batch_size=config['batch_size'],
-                                                    capacity=config['ip_queue_capacity'],
-                                                    enqueue_many=False,
-                                                    dynamic_pad=True,
-                                                    allow_smaller_final_batch = False,
-                                                    name="batch_join_and_pad")
-
-        return batch_rgb, batch_labels, batch_lens
-
-def read_and_decode_sequence_test_data(filename_queue, config):
-    """
-    Replace label field with id field because test data doesn't contain labels.
-    """
-    # Create a TFRecordReader.
-    readerOptions = tf.python_io.TFRecordOptions(compression_type=tf.python_io.TFRecordCompressionType.GZIP)
-    reader = tf.TFRecordReader(options=readerOptions)
-    _, serialized_example = reader.read(filename_queue)
-
-    # Read one sequence sample.
-    # The training and validation files contains the following fields:
-    # - label: label of the sequence which take values between 1 and 20.
-    # - length: length of the sequence, i.e., number of frames.
-    # - depth: sequence of depth images. [length x height x width x numChannels]
-    # - rgb: sequence of rgb images. [length x height x width x numChannels]
-    # - segmentation: sequence of segmentation maskes. [length x height x width x numChannels]
-    # - skeleton: sequence of flattened skeleton joint positions. [length x numJoints]
-    #
-    # The test files doesn't contain "label" field.
-    # [height, width, numChannels] = [80, 80, 3]
-    with tf.name_scope("TFRecordDecoding"):
-        context_encoded, sequence_encoded = tf.parse_single_sequence_example(
-                serialized_example,
-                # "label" and "lenght" are encoded as context features.
-                context_features={
-                    "id": tf.FixedLenFeature([], dtype=tf.int64),
-                    "length": tf.FixedLenFeature([], dtype=tf.int64)
-                },
-                # "depth", "rgb", "segmentation", "skeleton" are encoded as sequence features.
-                sequence_features={
-                    "depth": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                    "rgb": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                    "segmentation": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                    "skeleton": tf.FixedLenSequenceFeature([], dtype=tf.string),
-                })
-
-
-        # Fetch required data fields.
-        # TODO: Customize for your design. Assume that only the RGB images are used for now.
-        # Decode the serialized RGB images.
-        seq_rgb = tf.decode_raw(sequence_encoded['rgb'], tf.uint8)
-        seq_seg = tf.decode_raw(sequence_encoded['segmentation'], tf.uint8)
-        seq_dep = tf.decode_raw(sequence_encoded['depth'], tf.uint8)
-        seq_len = tf.to_int32(context_encoded['length'])
-        # Output dimnesionality: [seq_len, height, width, numChannels]
-        # tf.map_fn applies the preprocessing function on every image in the sequence, i.e., frame.
-        seq_rgb = tf.map_fn(lambda x: preprocessing_op(x, config),
-                                elems=(seq_rgb,seq_seg,seq_dep),
-                                dtype=tf.float32,
-                                back_prop=False)
+            
+        num_epochs = (config['num_epochs'] if mode is 'training' else 1)
+        shuffle = (mode is not 'training')
+            
+        filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs, shuffle=shuffle)
         
-        seq_id = context_encoded['id']
-
-        return [seq_rgb, seq_id, seq_len]
-
-
-def input_pipeline(filenames, config, name='input_pipeline', shuffle=True, mode='training'):
-    with tf.name_scope(name):
-        # Read the data from TFRecord files, decode and create a list of data samples by using threads.
-        if mode is "training":
-            # Create a queue of TFRecord input files.
-            filename_queue = tf.train.string_input_producer(filenames, num_epochs=config['num_epochs'], shuffle=shuffle)
-            sample_list = [read_and_decode_sequence(filename_queue, config) for _ in range(config['ip_num_read_threads'])]
-            batch_rgb, batch_labels, batch_lens = tf.train.batch_join(sample_list,
-                                                    batch_size=config['batch_size'],
-                                                    capacity=config['ip_queue_capacity'],
-                                                    enqueue_many=False,
-                                                    dynamic_pad=True,
-                                                    allow_smaller_final_batch = False,
-                                                    name="batch_join_and_pad")
-            return batch_rgb, batch_labels, batch_lens
-
-        else:
-            filename_queue = tf.train.string_input_producer(filenames, num_epochs=1, shuffle=False)
-            sample_list = [read_and_decode_sequence_test_data(filename_queue, config) for _ in range(config['ip_num_read_threads'])]
-            batch_rgb, batch_ids, batch_lens = tf.train.batch_join(sample_list,
-                                                    batch_size=config['batch_size'],
-                                                    capacity=config['ip_queue_capacity'],
-                                                    enqueue_many=False,
-                                                    dynamic_pad=True,
-                                                    allow_smaller_final_batch = True,
-                                                    name="batch_join_and_pad")
-            return batch_rgb, batch_ids, batch_lens
+        sample_list = [
+                read_and_decode_sequence(filename_queue, config, mode) for _ in range(config['ip_num_read_threads'])
+            ]
+            
+        batch_rgb, batch_labels, batch_lens = tf.train.batch_join(sample_list,
+                batch_size=config['lr']['batch_size'],
+                capacity=config['ip_queue_capacity'],
+                enqueue_many=False,
+                dynamic_pad=True,
+                allow_smaller_final_batch=(mode is not 'training'),
+                name="batch_join_and_pad"
+            )
+            
+        return batch_rgb, batch_labels, batch_lens
