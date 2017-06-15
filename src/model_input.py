@@ -1,4 +1,6 @@
 import tensorflow as tf
+import numpy as np
+
 
 def preprocessing_op(frame, config):
     """
@@ -12,6 +14,7 @@ def preprocessing_op(frame, config):
         rgb = frame[0]
         seg = frame[1]
         dep = frame[2]
+        skl = frame[3]
         
         # Reshape serialized image.
         rgb = tf.reshape(rgb, (config['img_height'], 
@@ -62,10 +65,75 @@ def preprocessing_op(frame, config):
         rgb = tf.squeeze(rgb)
         dep = tf.squeeze(dep)
         
+        bod = np.zeros((80,80))
+        
+        # create 80x80 grid
+        x = np.linspace(0,79,80)
+        y = np.linspace(0,79,80)
+        X, Y = np.meshgrid(x,y)
+        pos = np.empty(X.shape + (2,))
+        pos[:, :, 0] = X
+        pos[:, :, 1] = Y
+        
+        # initialize bod
+        bod = tf.zeros((80,80), dtype=tf.float64)
+        
+        # hip center
+        hcx = tf.subtract(skl[7],140)
+        hcy = tf.subtract(skl[8], 10)
+        
+        hcx = tf.cast(tf.div(hcx, 4), dtype=tf.float64)
+        hcy = tf.cast(tf.div(hcy, 4), dtype=tf.float64)
+
+        ds = tf.contrib.distributions
+        
+        mvn = ds.MultivariateNormalDiag(tf.stack((hcx, hcy)), np.array([20., 20.], dtype=np.float64))
+        
+        bod = tf.subtract(bod, mvn.pdf(pos))
+        
+        # shoulder center
+        scx = tf.subtract(skl[25],140)
+        scy = tf.subtract(skl[26], 10)
+        
+        scx = tf.cast(tf.div(scx, 4), dtype=tf.float64)
+        scy = tf.cast(tf.div(scy, 4), dtype=tf.float64)
+
+        ds = tf.contrib.distributions
+        
+        mvn = ds.MultivariateNormalDiag(tf.stack((scx, scy)), np.array([20., 20.], dtype=np.float64))
+        
+        bod = tf.subtract(bod, mvn.pdf(pos))
+        
+        # left hand
+        lhx = tf.subtract(skl[70],140)
+        lhy = tf.subtract(skl[71], 10)
+        
+        lhx = tf.cast(tf.div(lhx, 4), dtype=tf.float64)
+        lhy = tf.cast(tf.div(lhy, 4), dtype=tf.float64)
+
+        ds = tf.contrib.distributions
+        
+        mvn = ds.MultivariateNormalDiag(tf.stack((lhx, lhy)), np.array([10., 10.], dtype=np.float64))
+        
+        bod = tf.add(bod, mvn.pdf(pos))
+        
+        # right hand
+        rhx = tf.subtract(skl[106],140)
+        rhy = tf.subtract(skl[107], 10)
+        
+        rhx = tf.cast(tf.div(rhx, 4), dtype=tf.float64)
+        rhy = tf.cast(tf.div(rhy, 4), dtype=tf.float64)
+
+        ds = tf.contrib.distributions
+        
+        mvn = ds.MultivariateNormalDiag(tf.stack((rhx, rhy)), np.array([10., 10.], dtype=np.float64))
+        
+        bod = tf.add(bod, mvn.pdf(pos))
+        
         # Flatten image
         #image_op = tf.reshape(image_op, [-1])
     
-        return tf.stack([rgb, dep], axis=-1)
+        return tf.stack([rgb, dep, tf.to_float(bod)], axis=-1)
 
     
 def read_and_decode_sequence(filename_queue, config, mode):
@@ -122,6 +190,9 @@ def read_and_decode_sequence(filename_queue, config, mode):
         # sequence length
         seq_len = tf.to_int32(context_encoded['length'])
         
+        # skeleton
+        seq_skl = tf.decode_raw(sequence_encoded['skeleton'], tf.float32)
+        
         # channels
         seq_rgb = tf.decode_raw(sequence_encoded['rgb'], tf.uint8)
         seq_seg = tf.decode_raw(sequence_encoded['segmentation'], tf.uint8)
@@ -129,7 +200,7 @@ def read_and_decode_sequence(filename_queue, config, mode):
         
         # apply preprocessing to data
         seq_rgb = tf.map_fn(lambda x: preprocessing_op(x, config),
-                                elems=(seq_rgb,seq_seg,seq_dep),
+                                elems=(seq_rgb,seq_seg,seq_dep,seq_skl),
                                 dtype=tf.float32,
                                 back_prop=False)
         
